@@ -50,6 +50,12 @@ local REACTOR_COMPONENT_CLASSIFICATION = {
     ["gregtech:gt.ThoriumcellDep"] = REACTOR_COMPONENT_FUEL_ROD,
     ["gregtech:gt.Double_ThoriumcellDep"] = REACTOR_COMPONENT_FUEL_ROD,
     ["gregtech:gt.Quad_ThoriumcellDep"] = REACTOR_COMPONENT_FUEL_ROD,
+    ["IC2:reactorMOXSimple"] = REACTOR_COMPONENT_FUEL_ROD,
+    ["IC2:reactorMOXDual"] = REACTOR_COMPONENT_FUEL_ROD,
+    ["IC2:reactorMOXQuad"] = REACTOR_COMPONENT_FUEL_ROD,
+    ["ic2:reactorMOXSimple"] = REACTOR_COMPONENT_FUEL_ROD,
+    ["ic2:reactorMOXDual"] = REACTOR_COMPONENT_FUEL_ROD,
+    ["ic2:reactorMOXQuad"] = REACTOR_COMPONENT_FUEL_ROD,
 }
 
 local REACTOR_FUEL_ROD_DEPLETED = {
@@ -68,6 +74,15 @@ local REACTOR_FUEL_ROD_DEPLETED = {
     ["gregtech:gt.Double_ThoriumcellDep"] = true,
     ["gregtech:gt.Quad_ThoriumcellDep"] = true,
     -- idk make a PR with the rest or smth I don't care myself
+}
+
+local REACTOR_MOX_ROD_NAMES = {
+    ["IC2:reactorMOXSimple"] = true,
+    ["IC2:reactorMOXDual"] = true,
+    ["IC2:reactorMOXQuad"] = true,
+    ["ic2:reactorMOXSimple"] = true,
+    ["ic2:reactorMOXDual"] = true,
+    ["ic2:reactorMOXQuad"] = true,
 }
 
 local function classify_reactor_item(item)
@@ -118,6 +133,13 @@ local LSC_HYSTERESIS_MAX = 0.95
 local COOLING_CELL_DEPLETED_THRESHOLD = 0.95 -- USE AT LEAST 360k COOLANT CELLS!!!
 local MAX_REACTOR_OPERATING_HEAT_PCT = 0.5
 local MAX_REPLACED_COOLANT_PER_TICK = 8
+
+local MOX_MODE = true
+local MOX_MIN_OPERATING_HEAT_PCT = 0.995
+local MOX_MAX_OPERATING_HEAT_PCT = 0.997
+local MOX_TARGET_HEAT_PCT = 0.99
+local MOX_RAMP_SLOT = 23
+local MOX_PREHEAT_SLEEP_SECONDS = 0.5
 
 local START_UPTIME = computer.uptime()
 
@@ -176,6 +198,156 @@ local function is_fuel_rod_depleted(item)
     return false
 end
 
+local function does_reactor_use_mox(reactor_items)
+    for i = 0, 53 do
+        local item = reactor_items[i]
+        if item ~= nil and next(item) ~= nil and REACTOR_MOX_ROD_NAMES[item.name] then
+            return true
+        end
+    end
+    return false
+end
+
+local function preheat_single_mox_reactor(reactor)
+    local reactor_items = reactor.transposer.getAllStacks(reactor.transposer_sides.reactor_chamber).getAll()
+    if not does_reactor_use_mox(reactor_items) then
+        return
+    end
+
+    reactor.current_heat = reactor.reactor_chamber.getHeat()
+    reactor.max_heat = reactor.reactor_chamber.getMaxHeat()
+    local heat_pct = reactor.current_heat / reactor.max_heat
+    if heat_pct >= MOX_MIN_OPERATING_HEAT_PCT then
+        return
+    end
+
+    log_info("Starting MOX preheat for reactor " .. get_short_address(reactor.transposer))
+
+    local stored_rods = {}
+    local temp_side = reactor.transposer_sides.temp_storage
+
+    for i = 0, 53 do
+        local slot = i + 1
+        local item = reactor_items[i]
+        if item ~= nil and next(item) ~= nil then
+            local classification = classify_reactor_item(item)
+            if classification == REACTOR_COMPONENT_FUEL_ROD then
+                local temp_slot = find_first_empty_slot_on_side(reactor, temp_side)
+                if temp_slot == nil then
+                    log_warning("MOX preheat failed for reactor " ..
+                        get_short_address(reactor.transposer) .. ": no space in temporary storage.")
+                    for _, info in ipairs(stored_rods) do
+                        reactor.transposer.transferItem(temp_side, reactor.transposer_sides.reactor_chamber,
+                            info.size, info.temp_slot, info.reactor_slot)
+                    end
+                    return
+                end
+
+                reactor.transposer.transferItem(reactor.transposer_sides.reactor_chamber, temp_side,
+                    item.size, slot, temp_slot)
+                table.insert(stored_rods, {
+                    reactor_slot = slot,
+                    temp_slot = temp_slot,
+                    name = item.name,
+                    size = item.size
+                })
+            end
+        end
+    end
+
+    local ramp_info = nil
+    for _, info in ipairs(stored_rods) do
+        if REACTOR_MOX_ROD_NAMES[info.name] then
+            ramp_info = info
+            break
+        end
+    end
+
+    if ramp_info == nil then
+        log_warning("MOX preheat failed for reactor " ..
+            get_short_address(reactor.transposer) .. ": no MOX fuel in reactor.")
+        for _, info in ipairs(stored_rods) do
+            reactor.transposer.transferItem(temp_side, reactor.transposer_sides.reactor_chamber,
+                info.size, info.temp_slot, info.reactor_slot)
+        end
+        return
+    end
+
+    reactor.status = "Preheating"
+
+    reactor.transposer.transferItem(temp_side, reactor.transposer_sides.reactor_chamber,
+        1, ramp_info.temp_slot, MOX_RAMP_SLOT)
+    ramp_info.size = ramp_info.size - 1
+
+    set_reactor_enabled(reactor, true)
+
+    while true do
+        os.sleep(MOX_PREHEAT_SLEEP_SECONDS)
+        reactor.current_heat = reactor.reactor_chamber.getHeat()
+        reactor.max_heat = reactor.reactor_chamber.getMaxHeat()
+        heat_pct = reactor.current_heat / reactor.max_heat
+
+        if heat_pct >= MOX_TARGET_HEAT_PCT then
+            break
+        end
+
+        if heat_pct > MOX_MAX_OPERATING_HEAT_PCT then
+            log_warning("MOX preheat stopped early for reactor " .. get_short_address(reactor.transposer) ..
+                " core temp " .. tostring(math.floor(heat_pct * 100)) .. "%.")
+            break
+        end
+    end
+
+    set_reactor_enabled(reactor, false)
+
+    local temp_slot_for_ramp = find_first_empty_slot_on_side(reactor, temp_side)
+    if temp_slot_for_ramp ~= nil then
+        reactor.transposer.transferItem(reactor.transposer_sides.reactor_chamber, temp_side,
+            1, MOX_RAMP_SLOT, temp_slot_for_ramp)
+        ramp_info.size = ramp_info.size + 1
+        table.insert(stored_rods, {
+            reactor_slot = ramp_info.reactor_slot,
+            temp_slot = temp_slot_for_ramp,
+            name = ramp_info.name,
+            size = 1
+        })
+    else
+        log_warning("MOX preheat: could not move ramp rod back to temporary storage for reactor " ..
+            get_short_address(reactor.transposer))
+    end
+
+    for _, info in ipairs(stored_rods) do
+        if info.size > 0 then
+            reactor.transposer.transferItem(temp_side, reactor.transposer_sides.reactor_chamber,
+                info.size, info.temp_slot, info.reactor_slot)
+        end
+    end
+
+    reactor.current_heat = reactor.reactor_chamber.getHeat()
+    local final_pct = math.floor(reactor.current_heat / reactor.max_heat * 100)
+    reactor.status = "Idle"
+    log_info("Completed MOX preheat for reactor " .. get_short_address(reactor.transposer) ..
+        " at " .. tostring(final_pct) .. "% core temp.")
+end
+
+local function preheat_mox_reactors(reactors)
+    if not MOX_MODE then
+        return
+    end
+
+    for _, reactor in ipairs(reactors) do
+        local reactor_items = reactor.transposer.getAllStacks(reactor.transposer_sides.reactor_chamber).getAll()
+        if does_reactor_use_mox(reactor_items) then
+            reactor.current_heat = reactor.reactor_chamber.getHeat()
+            reactor.max_heat = reactor.reactor_chamber.getMaxHeat()
+            local heat_pct = reactor.current_heat / reactor.max_heat
+            if heat_pct < MOX_MIN_OPERATING_HEAT_PCT then
+                preheat_single_mox_reactor(reactor)
+            end
+        end
+    end
+end
+
 local function get_expected_reactor_component(slot)
     local row = (slot - 1) // REACTOR_COLS + 1
     local col = (slot - 1) % REACTOR_COLS + 1
@@ -200,6 +372,22 @@ local function find_slot_for_depleted_cooling_cell(reactor)
         slot = slot + 1
     end
 
+    return nil
+end
+
+local function find_first_empty_slot_on_side(reactor, side)
+    local items = reactor.transposer.getAllStacks(side)
+    local slot = 1
+    while true do
+        local item = items()
+        if item == nil then
+            break
+        end
+        if next(item) == nil then
+            return slot
+        end
+        slot = slot + 1
+    end
     return nil
 end
 
@@ -272,7 +460,7 @@ local function find_fuel_rod_provider_slot(reactor)
     return nil
 end
 
-local function replace_depleted_cooling_cell(reactor, item, slot)
+local function replace_depleted_cooling_cell(reactor, reactor_items, item, slot, uses_mox)
     -- First identify slots that we will use.
     -- This is because we need to perform the transfer as fast as possible, but these calls take time.
     local slot_for_depleted_cooling_cell = nil
@@ -288,13 +476,80 @@ local function replace_depleted_cooling_cell(reactor, item, slot)
         return "No cooling cell in the provider."
     end
 
-    if slot_for_depleted_cooling_cell ~= nil then
-        reactor.transposer.transferItem(reactor.transposer_sides.reactor_chamber, reactor.transposer_sides.depleted_cooling_cells_side, 1, slot, slot_for_depleted_cooling_cell)
+    local moved_rods = nil
+
+    if uses_mox then
+        moved_rods = {}
+
+        local row = (slot - 1) // REACTOR_COLS + 1
+        local col = (slot - 1) % REACTOR_COLS + 1
+
+        local function move_neighbour(neighbour_row, neighbour_col)
+            if neighbour_row < 1 or neighbour_row > REACTOR_ROWS or neighbour_col < 1 or neighbour_col > REACTOR_COLS then
+                return nil
+            end
+
+            local neighbour_slot = (neighbour_row - 1) * REACTOR_COLS + neighbour_col
+            local neighbour_index = neighbour_slot - 1
+            local neighbour_item = reactor_items[neighbour_index]
+
+            if neighbour_item == nil or next(neighbour_item) == nil then
+                return nil
+            end
+
+            local classification = classify_reactor_item(neighbour_item)
+            if classification ~= REACTOR_COMPONENT_FUEL_ROD then
+                return nil
+            end
+
+            local temp_slot = find_first_empty_slot_on_side(reactor, reactor.transposer_sides.temp_storage)
+            if temp_slot == nil then
+                return "No space in temporary storage for neighbouring fuel rods."
+            end
+
+            reactor.transposer.transferItem(reactor.transposer_sides.reactor_chamber,
+                reactor.transposer_sides.temp_storage, 1, neighbour_slot, temp_slot)
+            table.insert(moved_rods, { reactor_slot = neighbour_slot, temp_slot = temp_slot })
+
+            return nil
+        end
+
+        local err
+        err = move_neighbour(row - 1, col)
+        if err ~= nil then
+            return err
+        end
+        err = move_neighbour(row + 1, col)
+        if err ~= nil then
+            return err
+        end
+        err = move_neighbour(row, col - 1)
+        if err ~= nil then
+            return err
+        end
+        err = move_neighbour(row, col + 1)
+        if err ~= nil then
+            return err
+        end
     end
 
-    reactor.transposer.transferItem(reactor.transposer_sides.full_cooling_cells_side, reactor.transposer_sides.reactor_chamber, 1, new_cooling_cell_slot, slot)
+    if slot_for_depleted_cooling_cell ~= nil then
+        reactor.transposer.transferItem(reactor.transposer_sides.reactor_chamber,
+            reactor.transposer_sides.depleted_cooling_cells_side, 1, slot, slot_for_depleted_cooling_cell)
+    end
 
-    log_info("Replaced cooling cell in reactor " .. get_short_address(reactor.transposer) .. " in slot " .. tostring(slot))
+    reactor.transposer.transferItem(reactor.transposer_sides.full_cooling_cells_side,
+        reactor.transposer_sides.reactor_chamber, 1, new_cooling_cell_slot, slot)
+
+    if moved_rods ~= nil then
+        for _, info in ipairs(moved_rods) do
+            reactor.transposer.transferItem(reactor.transposer_sides.temp_storage,
+                reactor.transposer_sides.reactor_chamber, 1, info.temp_slot, info.reactor_slot)
+        end
+    end
+
+    log_info("Replaced cooling cell in reactor " ..
+        get_short_address(reactor.transposer) .. " in slot " .. tostring(slot))
 
     return nil
 end
@@ -316,10 +571,12 @@ local function replace_depleted_fuel_rod(reactor, item, slot)
     end
 
     if slot_for_depleted_fuel_rod ~= nil then
-        reactor.transposer.transferItem(reactor.transposer_sides.reactor_chamber, reactor.transposer_sides.general_provider, 1, slot, slot_for_depleted_fuel_rod)
+        reactor.transposer.transferItem(reactor.transposer_sides.reactor_chamber,
+            reactor.transposer_sides.general_provider, 1, slot, slot_for_depleted_fuel_rod)
     end
 
-    reactor.transposer.transferItem(reactor.transposer_sides.general_provider, reactor.transposer_sides.reactor_chamber, 1, new_fuel_rod_slot, slot)
+    reactor.transposer.transferItem(reactor.transposer_sides.general_provider, reactor.transposer_sides.reactor_chamber,
+        1, new_fuel_rod_slot, slot)
 
     log_info("Replaced fuel rod in reactor " .. get_short_address(reactor.transposer) .. " in slot " .. tostring(slot))
 
@@ -328,14 +585,15 @@ end
 
 local function try_replace_coolant(reactor, reactor_items)
     local n_replaced = 0
-    for i=0,53 do
+    local uses_mox = does_reactor_use_mox(reactor_items)
+    for i = 0, 53 do
         local slot = i + 1
         local item = reactor_items[i]
 
         local expected_classification = get_expected_reactor_component(slot)
         if expected_classification == REACTOR_COMPONENT_COOLANT_CELL then
             if item == nil or next(item) == nil or is_cooling_cell_depleted(item) then
-                local error = replace_depleted_cooling_cell(reactor, item, slot)
+                local error = replace_depleted_cooling_cell(reactor, reactor_items, item, slot, uses_mox)
                 if error ~= nil then
                     return error
                 end
@@ -351,7 +609,7 @@ local function try_replace_coolant(reactor, reactor_items)
 end
 
 local function try_replace_one_fuel_rod(reactor, reactor_items)
-    for i=0,53 do
+    for i = 0, 53 do
         local slot = i + 1
         local item = reactor_items[i]
 
@@ -452,7 +710,7 @@ end
 local function get_transposer_sides(transposer_proxy)
     local transposer_sides = {}
 
-    for side=0,5 do
+    for side = 0, 5 do
         local name = transposer_proxy.getInventoryName(side)
         if name ~= nil then
             local size = transposer_proxy.getInventorySize(side)
@@ -504,17 +762,21 @@ local function get_transposer_sides(transposer_proxy)
 end
 
 local function is_reactor_transposer(transposer_sides)
-    return transposer_sides.reactor_chamber ~= nil and transposer_sides.temp_storage ~= nil and transposer_sides.general_provider ~= nil and transposer_sides.full_cooling_cells_side ~= nil and transposer_sides.depleted_cooling_cells_side ~= nil
+    return transposer_sides.reactor_chamber ~= nil and transposer_sides.temp_storage ~= nil and
+        transposer_sides.general_provider ~= nil and transposer_sides.full_cooling_cells_side ~= nil and
+        transposer_sides.depleted_cooling_cells_side ~= nil
 end
 
 local function store_reactor_chamber(reactor_transposer)
     -- The transposer must have a reactor chamber and exactly one iron chest attached.
-    transfer_inventory(reactor_transposer.proxy, reactor_transposer.sides.reactor_chamber, reactor_transposer.sides.temp_storage)
+    transfer_inventory(reactor_transposer.proxy, reactor_transposer.sides.reactor_chamber,
+        reactor_transposer.sides.temp_storage)
 end
 
 local function load_reactor_chamber(reactor_transposer)
     -- The transposer must have a reactor chamber and exactly one iron chest attached.
-    transfer_inventory(reactor_transposer.proxy, reactor_transposer.sides.temp_storage, reactor_transposer.sides.reactor_chamber)
+    transfer_inventory(reactor_transposer.proxy, reactor_transposer.sides.temp_storage,
+        reactor_transposer.sides.reactor_chamber)
 end
 
 local function find_reactor_chambers()
@@ -591,10 +853,12 @@ local function identify_controlled_reactors(reactor_chambers, reactor_transposer
         for _, reactor_chamber in ipairs(reactor_chambers) do
             if reactor_chamber.producesEnergy() then
                 if found then
-                    error("Found multiple Reactor Chambers connected to a single Redstone IO [" .. redstone_io.address .. "].")
+                    error("Found multiple Reactor Chambers connected to a single Redstone IO [" ..
+                        redstone_io.address .. "].")
                 end
 
-                print("Found Reactor Chamber [" .. reactor_chamber.address .. "] matching Redstone IO [" .. redstone_io.address .. "].")
+                print("Found Reactor Chamber [" ..
+                    reactor_chamber.address .. "] matching Redstone IO [" .. redstone_io.address .. "].")
 
                 table.insert(reactors, {
                     redstone_io = redstone_io,
@@ -613,12 +877,14 @@ local function identify_controlled_reactors(reactor_chambers, reactor_transposer
     for _, reactor_transposer in ipairs(reactor_transposers) do
         print("Searching for a Reactor Chamber matching Transposer [" .. reactor_transposer.proxy.address .. "].")
 
-        local reactor_plating_slot = find_reactor_plating_slot(reactor_transposer.proxy, reactor_transposer.sides.general_provider)
+        local reactor_plating_slot = find_reactor_plating_slot(reactor_transposer.proxy,
+            reactor_transposer.sides.general_provider)
         if reactor_plating_slot == nil then
             error("Could not find reactor plating item in the general provider inventory.")
         end
 
-        reactor_transposer.proxy.transferItem(reactor_transposer.sides.general_provider, reactor_transposer.sides.reactor_chamber, 1, reactor_plating_slot, 1)
+        reactor_transposer.proxy.transferItem(reactor_transposer.sides.general_provider,
+            reactor_transposer.sides.reactor_chamber, 1, reactor_plating_slot, 1)
 
         os.sleep(1.2) -- wait for the reactor to update
 
@@ -626,10 +892,13 @@ local function identify_controlled_reactors(reactor_chambers, reactor_transposer
         for _, reactor in ipairs(reactors) do
             if reactor.reactor_chamber.getMaxHeat() > reactor.base_max_heat then
                 if found then
-                    error("Found multiple Reactor Chambers connected to a single Transposer [" .. reactor_transposer.proxy.address .. "].")
+                    error("Found multiple Reactor Chambers connected to a single Transposer [" ..
+                        reactor_transposer.proxy.address .. "].")
                 end
 
-                print("Found Reactor Chamber [" .. reactor.reactor_chamber.address .. "] matching Transposer [" .. reactor_transposer.proxy.address .. "].")
+                print("Found Reactor Chamber [" ..
+                    reactor.reactor_chamber.address ..
+                    "] matching Transposer [" .. reactor_transposer.proxy.address .. "].")
 
                 reactor.transposer = reactor_transposer.proxy
                 reactor.transposer_sides = reactor_transposer.sides
@@ -638,7 +907,8 @@ local function identify_controlled_reactors(reactor_chambers, reactor_transposer
             end
         end
 
-        reactor_transposer.proxy.transferItem(reactor_transposer.sides.reactor_chamber, reactor_transposer.sides.general_provider, 1, 1, reactor_plating_slot)
+        reactor_transposer.proxy.transferItem(reactor_transposer.sides.reactor_chamber,
+            reactor_transposer.sides.general_provider, 1, 1, reactor_plating_slot)
     end
 
     for _, reactor in ipairs(reactors) do
@@ -661,7 +931,9 @@ local function identify_controlled_reactors(reactor_chambers, reactor_transposer
         reactor.max_heat = reactor.reactor_chamber.getMaxHeat()
         reactor.output_eut = reactor.reactor_chamber.getReactorEUOutput()
 
-        print("Found reactor: \n\t - Reactor chamber: " .. reactor.reactor_chamber.address .. "\n\t - Transposer: " .. reactor.transposer.address .. "\n\t - Redstone IO: " .. reactor.redstone_io.address)
+        print("Found reactor: \n\t - Reactor chamber: " ..
+            reactor.reactor_chamber.address ..
+            "\n\t - Transposer: " .. reactor.transposer.address .. "\n\t - Redstone IO: " .. reactor.redstone_io.address)
     end
 
     return reactors
@@ -713,11 +985,25 @@ local function initialize_reactors()
 end
 
 local function is_reactor_inventory_in_operating_condition(reactor, reactor_items)
-    if reactor.current_heat >= reactor.max_heat * MAX_REACTOR_OPERATING_HEAT_PCT then
-        return false, "SHUTDOWN: Reactor overheated."
+    local uses_mox = MOX_MODE and does_reactor_use_mox(reactor_items)
+    local heat_pct = reactor.current_heat / reactor.max_heat
+
+    if uses_mox then
+        if heat_pct < MOX_MIN_OPERATING_HEAT_PCT or heat_pct > MOX_MAX_OPERATING_HEAT_PCT then
+            log_warning("MOX reactor " ..
+                get_short_address(reactor.transposer) ..
+                " core temp out of range: " ..
+                tostring(math.floor(heat_pct * 100)) ..
+                "% (expected around " .. tostring(math.floor(MOX_TARGET_HEAT_PCT * 100)) .. "%).")
+            return false, "SHUTDOWN: MOX core temp out of range."
+        end
+    else
+        if reactor.current_heat >= reactor.max_heat * MAX_REACTOR_OPERATING_HEAT_PCT then
+            return false, "SHUTDOWN: Reactor overheated."
+        end
     end
 
-    for i=0,53 do
+    for i = 0, 53 do
         local slot = i + 1
         local item = reactor_items[i]
 
@@ -888,9 +1174,11 @@ local function create_widgets(lsc, reactors)
             local lsc_fill_pct = math.floor(lsc_status.used_capacity_eu / lsc_status.total_capacity_eu * 100)
 
             local empty_or_full_message = ""
-            local average_net_input_eut = lsc_status.avg_input_eut - lsc_status.avg_output_eut - lsc_status.passive_loss_eut
+            local average_net_input_eut = lsc_status.avg_input_eut - lsc_status.avg_output_eut -
+                lsc_status.passive_loss_eut
             if average_net_input_eut > 0 then
-                local full_in_seconds = (lsc_status.total_capacity_eu - lsc_status.used_capacity_eu) / average_net_input_eut / 20
+                local full_in_seconds = (lsc_status.total_capacity_eu - lsc_status.used_capacity_eu) /
+                    average_net_input_eut / 20
                 empty_or_full_message = "; Full in " .. format_seconds(full_in_seconds)
             elseif average_net_input_eut < 0 then
                 local empty_in_seconds = lsc_status.used_capacity_eu / -average_net_input_eut / 20
@@ -900,50 +1188,62 @@ local function create_widgets(lsc, reactors)
             local function is_digit(c)
                 return c >= '0' and c <= '9'
             end
-            
+
             local function format_integer_part(digits)
                 local length = #digits
                 local parts = {}
-               
+
                 for i = length, 1, -3 do
                     local start = math.max(1, i - 2)
                     table.insert(parts, 1, digits:sub(start, i))
                 end
-                
+
                 return table.concat(parts, ",")
             end
-            
+
             local function split_parts(s)
                 local prefix = ""
                 local digits = ""
                 local i = 1
-                
+
                 while i <= #s and not is_digit(s:sub(i, i)) do
                     prefix = prefix .. s:sub(i, i)
                     i = i + 1
                 end
-                
+
                 while i <= #s and is_digit(s:sub(i, i)) do
                     digits = digits .. s:sub(i, i)
                     i = i + 1
                 end
-                
+
                 local suffix = s:sub(i)
-                
+
                 return prefix, digits, suffix
             end
-            
+
             local function format_number(n)
                 local s = tostring(n)
                 local prefix, digits, suffix = split_parts(s)
                 return prefix .. format_integer_part(digits) .. suffix
             end
-            
+
             draw_window("LSC", widget.min_x, widget.min_y, widget.max_x, widget.max_y)
-            gpu.set(widget.min_x + 2, widget.min_y + 1, "Tick: " .. format_number(tick) .. "; Uptime: " .. string.format("%.02f", uptime) .. "s")
-            gpu.set(widget.min_x + 2, widget.min_y + 2, "LSC: " .. format_number(lsc_status.used_capacity_eu) .. "EU / " .. format_number(lsc_status.total_capacity_eu) .. "EU   (" .. tostring(lsc_fill_pct) .. "%)")
-            gpu.set(widget.min_x + 2, widget.min_y + 3, "Passive loss: " .. format_number(lsc_status.passive_loss_eut) .. "EU/t")
-            gpu.set(widget.min_x + 2, widget.min_y + 4, "I/O [EU/t]: +" .. format_number(lsc_status.avg_input_eut) .. " -" .. format_number(lsc_status.avg_output_eut) .. " -" .. format_number(lsc_status.passive_loss_eut) .. " = " .. format_number(average_net_input_eut) .. "EU/t" .. empty_or_full_message)
+            gpu.set(widget.min_x + 2, widget.min_y + 1,
+                "Tick: " .. format_number(tick) .. "; Uptime: " .. string.format("%.02f", uptime) .. "s")
+            gpu.set(widget.min_x + 2, widget.min_y + 2,
+                "LSC: " ..
+                format_number(lsc_status.used_capacity_eu) ..
+                "EU / " .. format_number(lsc_status.total_capacity_eu) .. "EU   (" .. tostring(lsc_fill_pct) .. "%)")
+            gpu.set(widget.min_x + 2, widget.min_y + 3,
+                "Passive loss: " .. format_number(lsc_status.passive_loss_eut) .. "EU/t")
+            gpu.set(widget.min_x + 2, widget.min_y + 4,
+                "I/O [EU/t]: +" ..
+                format_number(lsc_status.avg_input_eut) ..
+                " -" ..
+                format_number(lsc_status.avg_output_eut) ..
+                " -" ..
+                format_number(lsc_status.passive_loss_eut) ..
+                " = " .. format_number(average_net_input_eut) .. "EU/t" .. empty_or_full_message)
             gpu.set(widget.min_x + 2, widget.min_y + 5, "LSC maintenance status: ")
             if lsc_status.needs_maintenance then
                 gpu.setForeground(0xFF0000)
@@ -968,9 +1268,9 @@ local function create_widgets(lsc, reactors)
 
     y = y + 7 + 2
     -- later allow clicking a row to go into a detailed overview ?
-        -- unless would be too laggy
-        -- render the reactor
-        -- calculate estimated stats
+    -- unless would be too laggy
+    -- render the reactor
+    -- calculate estimated stats
     local num_reactors = #reactors
     local reactors_widget = {
         name = "reactors_widget",
@@ -994,7 +1294,8 @@ local function create_widgets(lsc, reactors)
         end,
         draw = function(widget, tick)
             local reactor_display_header_line1 = "   │ Transposer │   Output   │ Heat │ Status"
-            local reactor_display_header_line2 = "───┼────────────┼────────────┼──────┼──────────────────────────────────────────"
+            local reactor_display_header_line2 =
+            "───┼────────────┼────────────┼──────┼──────────────────────────────────────────"
             local reactor_display_format = " %s | %8s   | %6dEU/t │ %3d%% │ %s"
 
             gpu.set(widget.min_x, widget.min_y, reactor_display_header_line1)
@@ -1020,7 +1321,8 @@ local function create_widgets(lsc, reactors)
 
                 local old_background_color, was_pallete = gpu.setBackground(background_color)
                 gpu.fill(widget.min_x, yy, widget.max_x - widget.min_x - 1, 1, " ")
-                gpu.set(widget.min_x, yy, string.format(reactor_display_format, enabled, transposer_uuid8, eut, heat_pct, status))
+                gpu.set(widget.min_x, yy,
+                    string.format(reactor_display_format, enabled, transposer_uuid8, eut, heat_pct, status))
                 gpu.setBackground(old_background_color, was_pallete)
 
                 yy = yy + 1
@@ -1064,7 +1366,6 @@ local function computer_has_sufficient_energy()
 end
 
 local function main()
-
     local resx, resy = gpu.maxResolution()
     if resx < 80 or resy < 25 then
         error("Insufficient screen size. At least 80x25 is required.")
@@ -1077,6 +1378,8 @@ local function main()
     update_lsc_readings(lsc)
 
     local reactors = initialize_reactors()
+
+    preheat_mox_reactors(reactors)
 
     local widgets = create_widgets(lsc, reactors)
 
