@@ -24,9 +24,15 @@ Aside from that you can modify the following constants:
 
 `COOLING_CELL_DEPLETED_THRESHOLD = 0.95` - the % of a coolant cell that has to be used in order for the program to recognize it as depleted. It should be modified for cells smaller than 360k. It is ill-advised to run with cells smaller than 360k.
 
-`MAX_REACTOR_OPERATING_HEAT_PCT = 0.5` - the reactor chamber heat threshold at which the reactor will be automatically disabled. No real reason to change it, unless you're trying out MOX stuff (which you shouldn't with the current script).
+`MAX_REACTOR_OPERATING_HEAT_PCT = 0.5` - the reactor chamber heat threshold at which non-MOX reactors will be automatically disabled. This is ignored for MOX reactors, which use a separate heat window.
 
-Modifying other constants is ill-advised and should only be done by advanced users.
+There are additional MOX-related constants defined in the script for advanced users:
+
+`MOX_MODE` - when enabled and MOX fuel rods are detected in a reactor, MOX-specific handling is used (automatic preheat and a narrow operating heat window). When disabled, MOX reactors are treated like normal ones and will be shut down at `MAX_REACTOR_OPERATING_HEAT_PCT`.
+
+`MOX_MIN_OPERATING_HEAT_PCT`, `MOX_MAX_OPERATING_HEAT_PCT`, `MOX_TARGET_HEAT_PCT` - lower/upper bounds and target for the reactor core temperature (relative to max heat) when running MOX designs. The controller will automatically ramp MOX reactors to approximately the target and will only keep them online while their core temperature stays within the configured window.
+
+Modifying these and other constants is ill-advised and should only be done by advanced users who understand GTNH reactor mechanics.
 
 ### Reactor setup
 
@@ -199,10 +205,15 @@ If the computer running this program has less than 50% of the energy buffer full
 
 ### MOX
 
-It would be nice to support MOX vacuum reactors, however due to issues outlined in the section about limitations it's unclear how to handle them. For sure the initialization would ramp up the heat using a specific chamber setup starting from 0 heat. For the maintanence there are two options:
+MOX vacuum reactors are now supported. The controller implements the recommendations from the GTNH wiki and the limitations section above as follows:
 
-1. Completely shut the reactor down when exchanging a coolant cell. From my experiments even this can be wonky though, and due to how redstone control works the delays would need to be quite long (multiple ticks before and after exchange). Though this might be fine with large coolants.
-2. When exchanging coolant first remove all neighbouring fuel cells. This would be fool-proof, if timing allows. Would also result in minimal power losses.
+* During initialization, if `MOX_MODE` is enabled and MOX fuel rods are detected in a reactor, the controller automatically performs a **preheat phase** using a single MOX fuel rod in a simple temporary configuration. The reactor is brought from 0 heat up to approximately the configured `MOX_TARGET_HEAT_PCT` (by default around 99% of max heat), then the original reactor layout is restored.
+
+* During normal operation, MOX reactors are only allowed to run while their core temperature stays within the configured `[MOX_MIN_OPERATING_HEAT_PCT, MOX_MAX_OPERATING_HEAT_PCT]` window. If the core temperature drifts outside this band, the controller will shut the reactor down and log a warning.
+
+* When exchanging coolant in MOX reactors, the controller first temporarily removes all orthogonally neighbouring fuel cells around the coolant cell being swapped, then performs the cell exchange, and finally restores the neighbouring fuel cells. This implements the "remove neighbouring fuel cells before exchanging coolant" strategy described in this README and in the GTNH documentation, and prevents a tick with fuel rods present but no coolant in the adjacent slot.
+
+All limitations in the sections above (most importantly the inability to handle OpenComputers hard crashes and the requirement for hull cooling) still apply. MOX designs run much closer to meltdown by design, so you should only use MOX with well-tested GTNH vacuum reactor designs and adequate hull cooling.
 
 ### Detailed overview
 
