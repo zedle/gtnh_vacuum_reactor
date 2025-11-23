@@ -50,12 +50,9 @@ local REACTOR_COMPONENT_CLASSIFICATION = {
     ["gregtech:gt.ThoriumcellDep"] = REACTOR_COMPONENT_FUEL_ROD,
     ["gregtech:gt.Double_ThoriumcellDep"] = REACTOR_COMPONENT_FUEL_ROD,
     ["gregtech:gt.Quad_ThoriumcellDep"] = REACTOR_COMPONENT_FUEL_ROD,
-    ["IC2:reactorMOXSimple"] = REACTOR_COMPONENT_FUEL_ROD,
-    ["IC2:reactorMOXDual"] = REACTOR_COMPONENT_FUEL_ROD,
-    ["IC2:reactorMOXQuad"] = REACTOR_COMPONENT_FUEL_ROD,
-    ["ic2:reactorMOXSimple"] = REACTOR_COMPONENT_FUEL_ROD,
-    ["ic2:reactorMOXDual"] = REACTOR_COMPONENT_FUEL_ROD,
-    ["ic2:reactorMOXQuad"] = REACTOR_COMPONENT_FUEL_ROD,
+    ["gregtech:gt.rodMOX"] = REACTOR_COMPONENT_FUEL_ROD,
+    ["gregtech:gt.rodMOX2"] = REACTOR_COMPONENT_FUEL_ROD,
+    ["gregtech:gt.rodMOX4"] = REACTOR_COMPONENT_FUEL_ROD,
 }
 
 local REACTOR_FUEL_ROD_DEPLETED = {
@@ -66,6 +63,9 @@ local REACTOR_FUEL_ROD_DEPLETED = {
     ["gregtech:gt.depletedRodThorium"] = true,
     ["gregtech:gt.depletedRodThorium2"] = true,
     ["gregtech:gt.depletedRodThorium4"] = true,
+    ["gregtech:gt.depletedRodMOX"] = true,
+    ["gregtech:gt.depletedRodMOX2"] = true,
+    ["gregtech:gt.depletedRodMOX4"] = true,
     --Rods for gtnh 2.7.4-
     ["IC2:reactorUraniumSimpledepleted"] = true,
     ["IC2:reactorUraniumDualdepleted"] = true,
@@ -77,12 +77,9 @@ local REACTOR_FUEL_ROD_DEPLETED = {
 }
 
 local REACTOR_MOX_ROD_NAMES = {
-    ["IC2:reactorMOXSimple"] = true,
-    ["IC2:reactorMOXDual"] = true,
-    ["IC2:reactorMOXQuad"] = true,
-    ["ic2:reactorMOXSimple"] = true,
-    ["ic2:reactorMOXDual"] = true,
-    ["ic2:reactorMOXQuad"] = true,
+    ["gregtech:gt.rodMOX"] = true,
+    ["gregtech:gt.rodMOX2"] = true,
+    ["gregtech:gt.rodMOX4"] = true,
 }
 
 local function classify_reactor_item(item)
@@ -135,8 +132,8 @@ local MAX_REACTOR_OPERATING_HEAT_PCT = 0.5
 local MAX_REPLACED_COOLANT_PER_TICK = 8
 
 local MOX_MODE = true
-local MOX_MIN_OPERATING_HEAT_PCT = 0.995
-local MOX_MAX_OPERATING_HEAT_PCT = 0.997
+local MOX_MIN_OPERATING_HEAT_PCT = 0.98
+local MOX_MAX_OPERATING_HEAT_PCT = 0.99
 local MOX_TARGET_HEAT_PCT = 0.99
 local MOX_RAMP_SLOT = 23
 local MOX_PREHEAT_SLEEP_SECONDS = 0.5
