@@ -239,6 +239,8 @@ end
 local function preheat_single_mox_reactor(reactor)
     local reactor_items = reactor.transposer.getAllStacks(reactor.transposer_sides.reactor_chamber).getAll()
     if not does_reactor_use_mox(reactor_items) then
+        log_info("MOX preheat: reactor " .. get_short_address(reactor.transposer) ..
+            " no longer contains MOX fuel; skipping preheat.")
         return
     end
 
@@ -246,6 +248,9 @@ local function preheat_single_mox_reactor(reactor)
     reactor.max_heat = reactor.reactor_chamber.getMaxHeat()
     local heat_pct = reactor.current_heat / reactor.max_heat
     if heat_pct >= MOX_MIN_OPERATING_HEAT_PCT then
+        reactor.mox_preheat_done = true
+        log_info("MOX preheat: reactor " .. get_short_address(reactor.transposer) ..
+            " already at " .. tostring(math.floor(heat_pct * 100)) .. "% core; skipping preheat.")
         return
     end
 
@@ -356,21 +361,30 @@ local function preheat_single_mox_reactor(reactor)
     reactor.status = "Idle"
     log_info("Completed MOX preheat for reactor " .. get_short_address(reactor.transposer) ..
         " at " .. tostring(final_pct) .. "% core temp.")
+    reactor.mox_preheat_done = true
 end
 
 local function preheat_mox_reactors(reactors)
     if not MOX_MODE then
+        log_info("MOX preheat: MOX_MODE disabled, skipping preheat for all reactors.")
         return
     end
 
     for _, reactor in ipairs(reactors) do
         local reactor_items = reactor.transposer.getAllStacks(reactor.transposer_sides.reactor_chamber).getAll()
-        if does_reactor_use_mox(reactor_items) then
+        local uses_mox = does_reactor_use_mox(reactor_items)
+        if uses_mox then
             reactor.current_heat = reactor.reactor_chamber.getHeat()
             reactor.max_heat = reactor.reactor_chamber.getMaxHeat()
             local heat_pct = reactor.current_heat / reactor.max_heat
+            log_info("MOX preheat: reactor " .. get_short_address(reactor.transposer) ..
+                " initial core " .. tostring(math.floor(heat_pct * 100)) .. "%.")
             if heat_pct < MOX_MIN_OPERATING_HEAT_PCT then
                 preheat_single_mox_reactor(reactor)
+            else
+                log_info("MOX preheat: reactor " .. get_short_address(reactor.transposer) ..
+                    " already within MOX operating window; skipping preheat.")
+                reactor.mox_preheat_done = true
             end
         end
     end
@@ -958,6 +972,7 @@ local function identify_controlled_reactors(reactor_chambers, reactor_transposer
         reactor.current_heat = reactor.reactor_chamber.getHeat()
         reactor.max_heat = reactor.reactor_chamber.getMaxHeat()
         reactor.output_eut = reactor.reactor_chamber.getReactorEUOutput()
+        reactor.mox_preheat_done = false
 
         print("Found reactor: \n\t - Reactor chamber: " ..
             reactor.reactor_chamber.address ..
@@ -1016,7 +1031,8 @@ local function is_reactor_inventory_in_operating_condition(reactor, reactor_item
     local uses_mox = MOX_MODE and does_reactor_use_mox(reactor_items)
     local heat_pct = reactor.current_heat / reactor.max_heat
 
-    if uses_mox then
+    if uses_mox and reactor.mox_preheat_done then
+        -- MOX reactor after preheat: enforce the narrow MOX operating window.
         if heat_pct < MOX_MIN_OPERATING_HEAT_PCT or heat_pct > MOX_MAX_OPERATING_HEAT_PCT then
             log_warning("MOX reactor " ..
                 get_short_address(reactor.transposer) ..
@@ -1026,6 +1042,7 @@ local function is_reactor_inventory_in_operating_condition(reactor, reactor_item
             return false, "SHUTDOWN: MOX core temp out of range."
         end
     else
+        -- Non-MOX reactors, or MOX reactors before/without preheat, use the generic overheat limit.
         if reactor.current_heat >= reactor.max_heat * MAX_REACTOR_OPERATING_HEAT_PCT then
             return false, "SHUTDOWN: Reactor overheated."
         end
@@ -1062,6 +1079,14 @@ local function tick_reactor(reactor, tick, should_work)
     end
 
     local reactor_items = reactor.transposer.getAllStacks(reactor.transposer_sides.reactor_chamber).getAll()
+
+    -- If this reactor uses MOX fuel but hasn't been preheated yet, perform the MOX preheat
+    -- sequence now and skip the rest of this tick. The preheat routine manages redstone
+    -- and restores the original layout when done.
+    if MOX_MODE and does_reactor_use_mox(reactor_items) and not reactor.mox_preheat_done then
+        preheat_single_mox_reactor(reactor)
+        return
+    end
 
     local is_ok, status = is_reactor_inventory_in_operating_condition(reactor, reactor_items)
     should_work = should_work and reactor.enabled and is_ok
