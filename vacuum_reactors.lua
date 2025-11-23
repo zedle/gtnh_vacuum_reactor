@@ -37,6 +37,9 @@ local REACTOR_COMPONENT_CLASSIFICATION = {
     ["gregtech:gt.depletedRodThorium"] = REACTOR_COMPONENT_FUEL_ROD,
     ["gregtech:gt.depletedRodThorium2"] = REACTOR_COMPONENT_FUEL_ROD,
     ["gregtech:gt.depletedRodThorium4"] = REACTOR_COMPONENT_FUEL_ROD,
+    ["gregtech:gt.rodMOX"] = REACTOR_COMPONENT_FUEL_ROD,
+    ["gregtech:gt.rodMOX2"] = REACTOR_COMPONENT_FUEL_ROD,
+    ["gregtech:gt.rodMOX4"] = REACTOR_COMPONENT_FUEL_ROD,
     --Rods for gtnh 2.7.4-
     ["gregtech:gt.reactorUraniumSimple"] = REACTOR_COMPONENT_FUEL_ROD,
     ["gregtech:gt.reactorUraniumDual"] = REACTOR_COMPONENT_FUEL_ROD,
@@ -50,9 +53,6 @@ local REACTOR_COMPONENT_CLASSIFICATION = {
     ["gregtech:gt.ThoriumcellDep"] = REACTOR_COMPONENT_FUEL_ROD,
     ["gregtech:gt.Double_ThoriumcellDep"] = REACTOR_COMPONENT_FUEL_ROD,
     ["gregtech:gt.Quad_ThoriumcellDep"] = REACTOR_COMPONENT_FUEL_ROD,
-    ["gregtech:gt.rodMOX"] = REACTOR_COMPONENT_FUEL_ROD,
-    ["gregtech:gt.rodMOX2"] = REACTOR_COMPONENT_FUEL_ROD,
-    ["gregtech:gt.rodMOX4"] = REACTOR_COMPONENT_FUEL_ROD,
 }
 
 local REACTOR_FUEL_ROD_DEPLETED = {
@@ -119,7 +119,7 @@ local REACTOR_COLS = #(REACTOR_PATTERN[1])
 
 local REACTOR_SIZE = REACTOR_ROWS * REACTOR_COLS
 
-local REACTOR_HEAT_READINGS_UPDATE_PERIOD = 3
+local REACTOR_HEAT_READINGS_UPDATE_PERIOD = 1
 local REACTOR_OUTPUT_READINGS_UPDATE_PERIOD = 10
 local LSC_READINGS_UPDATE_PERIOD = 10
 local DASHBOARD_UPDATE_PERIOD = 2
@@ -203,6 +203,37 @@ local function does_reactor_use_mox(reactor_items)
         end
     end
     return false
+end
+
+local function find_first_empty_slot_on_side(reactor, side)
+    local items = reactor.transposer.getAllStacks(side)
+    local slot = 1
+    while true do
+        local item = items()
+        if item == nil then
+            break
+        end
+        if next(item) == nil then
+            return slot
+        end
+        slot = slot + 1
+    end
+    return nil
+end
+
+local function set_reactor_enabled(reactor, enabled)
+    local redstone = reactor.redstone_io
+    if enabled then
+        if redstone.getOutput(sides.top) ~= 15 then
+            redstone.setOutput({ 15, 15, 15, 15, 15, 15 })
+            log_info("Enabled reactor " .. get_short_address(reactor.transposer))
+        end
+    else
+        if redstone.getOutput(sides.top) ~= 0 then
+            redstone.setOutput({ 0, 0, 0, 0, 0, 0 })
+            log_info("Disabled reactor " .. get_short_address(reactor.transposer))
+        end
+    end
 end
 
 local function preheat_single_mox_reactor(reactor)
@@ -369,22 +400,6 @@ local function find_slot_for_depleted_cooling_cell(reactor)
         slot = slot + 1
     end
 
-    return nil
-end
-
-local function find_first_empty_slot_on_side(reactor, side)
-    local items = reactor.transposer.getAllStacks(side)
-    local slot = 1
-    while true do
-        local item = items()
-        if item == nil then
-            break
-        end
-        if next(item) == nil then
-            return slot
-        end
-        slot = slot + 1
-    end
     return nil
 end
 
@@ -934,21 +949,6 @@ local function identify_controlled_reactors(reactor_chambers, reactor_transposer
     end
 
     return reactors
-end
-
-local function set_reactor_enabled(reactor, enabled)
-    local redstone = reactor.redstone_io
-    if enabled then
-        if redstone.getOutput(sides.top) ~= 15 then
-            redstone.setOutput({ 15, 15, 15, 15, 15, 15 })
-            log_info("Enabled reactor " .. get_short_address(reactor.transposer))
-        end
-    else
-        if redstone.getOutput(sides.top) ~= 0 then
-            redstone.setOutput({ 0, 0, 0, 0, 0, 0 })
-            log_info("Disabled reactor " .. get_short_address(reactor.transposer))
-        end
-    end
 end
 
 local function set_reactors_enabled(reactors, enabled)
