@@ -403,6 +403,22 @@ local function find_slot_for_depleted_cooling_cell(reactor)
     return nil
 end
 
+local function find_first_empty_slot_on_side(reactor, side)
+    local items = reactor.transposer.getAllStacks(side)
+    local slot = 1
+    while true do
+        local item = items()
+        if item == nil then
+            break
+        end
+        if next(item) == nil then
+            return slot
+        end
+        slot = slot + 1
+    end
+    return nil
+end
+
 local function find_slot_for_depleted_fuel_rod(reactor, rod)
     -- We need to find the first empty slot.
 
@@ -949,6 +965,21 @@ local function identify_controlled_reactors(reactor_chambers, reactor_transposer
     end
 
     return reactors
+end
+
+local function set_reactor_enabled(reactor, enabled)
+    local redstone = reactor.redstone_io
+    if enabled then
+        if redstone.getOutput(sides.top) ~= 15 then
+            redstone.setOutput({ 15, 15, 15, 15, 15, 15 })
+            log_info("Enabled reactor " .. get_short_address(reactor.transposer))
+        end
+    else
+        if redstone.getOutput(sides.top) ~= 0 then
+            redstone.setOutput({ 0, 0, 0, 0, 0, 0 })
+            log_info("Disabled reactor " .. get_short_address(reactor.transposer))
+        end
+    end
 end
 
 local function set_reactors_enabled(reactors, enabled)
